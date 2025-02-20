@@ -1,16 +1,21 @@
+name: Semgrep Security Scan
+
 on:
-  workflow_dispatch: {}
-  pull_request: {}
+  workflow_dispatch: {}  # Permite ejecutar manualmente el análisis
+  pull_request: {}  # Se ejecuta en cada PR
   push:
     branches:
-    - main
-    - master
+      - main
+      - master
     paths:
-    - .github/workflows/semgrep.yml
+      - .github/workflows/semgrep.yml  # Corre cuando se actualiza el workflow
   schedule:
-  # random HH:MM to avoid a load spike on GitHub Actions at 00:00
-  - cron: 35 10 * * *
-name: Semgrep
+    - cron: '35 10 * * *'  # Ejecuta el análisis diariamente a las 10:35 UTC
+
+permissions:
+  contents: read
+  pull-requests: write
+
 jobs:
   semgrep:
     name: semgrep/ci
@@ -20,5 +25,47 @@ jobs:
     container:
       image: returntocorp/semgrep
     steps:
-    - uses: actions/checkout@v4
-    - run: semgrep ci
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Run Semgrep Analysis
+        id: semgrep_scan
+        run: |
+          semgrep ci --json > semgrep-results.json || true
+
+      - name: Fetch Semgrep Dashboard Metrics
+        id: semgrep_dashboard
+        env:
+          SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
+        run: |
+          SEMGREP_API_URL="https://semgrep.dev/api/v1/orgs/me/stats"
+          echo "Fetching Semgrep Dashboard Metrics..."
+          RESPONSE=$(curl -s -H "Authorization: Bearer $SEMGREP_APP_TOKEN" $SEMGREP_API_URL)
+          if [[ -z "$RESPONSE" || "$RESPONSE" == *"errors"* ]]; then
+            echo "Error fetching Semgrep metrics: $RESPONSE"
+            exit 1
+          fi
+          echo "Semgrep API Response: $RESPONSE"
+          echo "response=$RESPONSE" >> $GITHUB_ENV
+
+      - name: Publish Semgrep Results as Annotations
+        run: |
+          echo "## 🔍 Semgrep Analysis Results" >> $GITHUB_STEP_SUMMARY
+          echo "| Rule | File | Line | Severity | Message |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|------|------|----------|---------|" >> $GITHUB_STEP_SUMMARY
+          cat semgrep-results.json | jq -r '.results[] | 
+          "| \(.check_id) | \(.path) | \(.start.line) | \(.extra.severity // "N/A") | \(.extra.message // "No message") |"' >> $GITHUB_STEP_SUMMARY
+
+      - name: Publish Semgrep Dashboard Metrics as Annotations
+        run: |
+          echo "## 📊 Semgrep Dashboard Metrics" >> $GITHUB_STEP_SUMMARY
+          echo "| Metric               | Value   |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------------------|---------|" >> $GITHUB_STEP_SUMMARY
+          echo $RESPONSE | jq -r '.stats | 
+          if .total_findings then "| Total Findings       | \(.total_findings) |" else empty end,
+          if .critical_findings then "| Critical Findings    | \(.critical_findings) |" else empty end,
+          if .high_findings then "| High Findings        | \(.high_findings) |" else empty end,
+          if .medium_findings then "| Medium Findings      | \(.medium_findings) |" else empty end,
+          if .low_findings then "| Low Findings         | \(.low_findings) |" else empty end' >> $GITHUB_STEP_SUMMARY
+        env:
+          RESPONSE: ${{ env.response }}
